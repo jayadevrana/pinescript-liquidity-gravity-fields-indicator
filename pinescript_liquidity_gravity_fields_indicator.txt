@@ -1,0 +1,143 @@
+//@version=6
+indicator("Liquidity Gravity Fields [Signal Forge]", shorttitle="Liquidity Gravity", overlay=true, max_boxes_count=200, max_labels_count=200, max_lines_count=300)
+
+groupCore = "Core"
+swingLen = input.int(5, "Swing Length", minval=2, group=groupCore)
+atrLen = input.int(14, "ATR Length", minval=1, group=groupCore)
+volumeLen = input.int(20, "Volume Baseline", minval=2, group=groupCore)
+volumeThreshold = input.float(1.10, "Sweep Volume Threshold", minval=0.60, step=0.05, group=groupCore)
+zonePad = input.float(0.25, "Zone ATR Padding", minval=0.05, step=0.05, group=groupCore)
+extendBars = input.int(55, "Zone Projection Bars", minval=5, maxval=300, group=groupCore)
+maxZones = input.int(8, "Max Zones Per Side", minval=1, maxval=20, group=groupCore)
+
+groupDisplay = "Display"
+showDashboard = input.bool(true, "Show Dashboard", group=groupDisplay)
+
+bullCore = color.rgb(0, 205, 170)
+bullGlow = color.rgb(132, 255, 220)
+bearCore = color.rgb(255, 94, 126)
+bearGlow = color.rgb(255, 184, 92)
+neutralCore = color.rgb(130, 140, 160)
+
+f_push_box(array<box> bucket, box item, int keep) =>
+    array.push(bucket, item)
+    if array.size(bucket) > keep
+        box.delete(array.shift(bucket))
+
+f_push_line(array<line> bucket, line item, int keep) =>
+    array.push(bucket, item)
+    if array.size(bucket) > keep
+        line.delete(array.shift(bucket))
+
+f_push_label(array<label> bucket, label item, int keep) =>
+    array.push(bucket, item)
+    if array.size(bucket) > keep
+        label.delete(array.shift(bucket))
+
+atr = ta.atr(atrLen)
+rsi = ta.rsi(close, 14)
+volumePulse = volume / math.max(ta.sma(volume, volumeLen), 1.0)
+
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+var float activeBullMid = na
+var float activeBullFloor = na
+var float activeBearMid = na
+var float activeBearCeiling = na
+var string lastEvent = "Waiting"
+
+var array<box> bullZones = array.new_box()
+var array<box> bearZones = array.new_box()
+var array<line> zoneMidlines = array.new_line()
+var array<label> eventLabels = array.new_label()
+var table dash = table.new(position.bottom_right, 2, 5, bgcolor=color.new(color.black, 58), frame_color=color.new(color.white, 70), frame_width=1)
+
+if not na(ph)
+    lastSwingHigh := ph
+    lastSwingHighBar := bar_index - swingLen
+
+if not na(pl)
+    lastSwingLow := pl
+    lastSwingLowBar := bar_index - swingLen
+
+equilibrium = na(lastSwingHigh) or na(lastSwingLow) ? na : (lastSwingHigh + lastSwingLow) * 0.5
+
+sellSideSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow and volumePulse > volumeThreshold
+buySideSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh and volumePulse > volumeThreshold
+
+if sellSideSweep and not sellSideSweep[1]
+    zoneTop = math.max(open, close) + atr * zonePad
+    zoneBottom = low - atr * zonePad
+    mid = (zoneTop + zoneBottom) * 0.5
+    f_push_box(bullZones, box.new(left=bar_index - 1, top=zoneTop, right=bar_index + extendBars, bottom=zoneBottom, extend=extend.right, bgcolor=color.new(bullCore, 86), border_color=color.new(bullGlow, 0), text="Demand", text_color=color.white), maxZones)
+    f_push_line(zoneMidlines, line.new(x1=bar_index - 1, y1=mid, x2=bar_index + extendBars, y2=mid, xloc=xloc.bar_index, extend=extend.right, color=color.new(bullGlow, 0), style=line.style_dotted), maxZones * 2)
+    f_push_label(eventLabels, label.new(x=bar_index, y=low - atr * 0.45, text="SELLSIDE SWEEP\nDemand armed", style=label.style_label_up, color=bullGlow, textcolor=color.black, size=size.small), maxZones * 2)
+    activeBullMid := mid
+    activeBullFloor := zoneBottom
+    lastEvent := "Sellside sweep"
+
+if buySideSweep and not buySideSweep[1]
+    zoneTop = high + atr * zonePad
+    zoneBottom = math.min(open, close) - atr * zonePad
+    mid = (zoneTop + zoneBottom) * 0.5
+    f_push_box(bearZones, box.new(left=bar_index - 1, top=zoneTop, right=bar_index + extendBars, bottom=zoneBottom, extend=extend.right, bgcolor=color.new(bearCore, 86), border_color=color.new(bearGlow, 0), text="Supply", text_color=color.white), maxZones)
+    f_push_line(zoneMidlines, line.new(x1=bar_index - 1, y1=mid, x2=bar_index + extendBars, y2=mid, xloc=xloc.bar_index, extend=extend.right, color=color.new(bearGlow, 0), style=line.style_dotted), maxZones * 2)
+    f_push_label(eventLabels, label.new(x=bar_index, y=high + atr * 0.45, text="BUYSIDE SWEEP\nSupply armed", style=label.style_label_down, color=bearGlow, textcolor=color.black, size=size.small), maxZones * 2)
+    activeBearMid := mid
+    activeBearCeiling := zoneTop
+    lastEvent := "Buyside sweep"
+
+if not na(activeBullFloor) and close < activeBullFloor
+    activeBullMid := na
+    activeBullFloor := na
+
+if not na(activeBearCeiling) and close > activeBearCeiling
+    activeBearMid := na
+    activeBearCeiling := na
+
+bullReclaim = not na(activeBullMid) and ta.crossover(close, activeBullMid) and close > ta.ema(close, 21) and rsi > 52.0
+bearReject = not na(activeBearMid) and ta.crossunder(close, activeBearMid) and close < ta.ema(close, 21) and rsi < 48.0
+
+if bullReclaim
+    f_push_label(eventLabels, label.new(x=bar_index, y=low - atr * 0.65, text="RECLAIM LONG", style=label.style_label_up, color=bullCore, textcolor=color.black, size=size.small), maxZones * 2)
+    lastEvent := "Bull reclaim"
+
+if bearReject
+    f_push_label(eventLabels, label.new(x=bar_index, y=high + atr * 0.65, text="REJECT SHORT", style=label.style_label_down, color=bearCore, textcolor=color.black, size=size.small), maxZones * 2)
+    lastEvent := "Bear reject"
+
+zoneBiasColor = na(equilibrium) ? color.new(neutralCore, 55) : close > equilibrium ? color.new(bullCore, 50) : close < equilibrium ? color.new(bearCore, 50) : color.new(neutralCore, 55)
+zoneState = na(equilibrium) ? "No Range" : close > equilibrium ? "Discount Bid" : close < equilibrium ? "Premium Offer" : "At Mid"
+zoneStateColor = na(equilibrium) ? neutralCore : close > equilibrium ? bullGlow : close < equilibrium ? bearGlow : neutralCore
+
+highPlot = plot(lastSwingHigh, "Buy-side Liquidity", color=color.new(bearGlow, 5), linewidth=2, style=plot.style_linebr)
+lowPlot = plot(lastSwingLow, "Sell-side Liquidity", color=color.new(bullGlow, 5), linewidth=2, style=plot.style_linebr)
+eqPlot = plot(equilibrium, "Equilibrium", color=color.new(color.white, 35), linewidth=1, style=plot.style_linebr)
+fill(highPlot, eqPlot, color=color.new(bearCore, 92))
+fill(eqPlot, lowPlot, color=color.new(bullCore, 92))
+
+barcolor(zoneBiasColor)
+plotshape(bullReclaim, title="Bull Reclaim", style=shape.circle, location=location.belowbar, color=bullGlow, size=size.tiny, text="R", textcolor=color.black)
+plotshape(bearReject, title="Bear Reject", style=shape.circle, location=location.abovebar, color=bearGlow, size=size.tiny, text="R", textcolor=color.black)
+
+if barstate.islast and showDashboard
+    table.cell(dash, 0, 0, "LIQUIDITY", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 0, zoneState, text_color=zoneStateColor, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 0, 1, "Last Event", text_color=color.white)
+    table.cell(dash, 1, 1, lastEvent, text_color=color.white)
+    table.cell(dash, 0, 2, "Vol Pulse", text_color=color.white)
+    table.cell(dash, 1, 2, str.tostring(volumePulse, "#.00") + "x", text_color=volumePulse > volumeThreshold ? bullGlow : neutralCore)
+    table.cell(dash, 0, 3, "Live Demand", text_color=color.white)
+    table.cell(dash, 1, 3, na(activeBullMid) ? "No" : "Armed", text_color=na(activeBullMid) ? neutralCore : bullGlow)
+    table.cell(dash, 0, 4, "Live Supply", text_color=color.white)
+    table.cell(dash, 1, 4, na(activeBearMid) ? "No" : "Armed", text_color=na(activeBearMid) ? neutralCore : bearGlow)
+
+if barstate.islast and not showDashboard
+    for row = 0 to 4
+        table.cell(dash, 0, row, "", bgcolor=color.new(color.black, 100))
+        table.cell(dash, 1, row, "", bgcolor=color.new(color.black, 100))
